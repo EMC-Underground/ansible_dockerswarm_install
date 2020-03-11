@@ -1,0 +1,18 @@
+---
+- hosts: all
+  become: true
+  vars_files:
+    - ./vars.yml
+  roles:
+  - all
+
+- hosts: master
+  become: true
+  roles:
+  - master
+
+- hosts: manager
+  become: true
+  roles:
+  - manager
+

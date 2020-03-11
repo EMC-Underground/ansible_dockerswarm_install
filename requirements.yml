@@ -1,0 +1,2 @@
+- src: dilerous.ansible_dockerswarm_install
+  name: ansible_dockerswarm_install

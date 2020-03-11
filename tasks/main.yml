@@ -1,2 +1,210 @@
----
-# tasks file for ansible_dockerswarm_install
+- name: "Installing Basic Tools"
+  package: pkg={{ item }} state=installed
+  with_items:
+  - git
+  - vim
+  - sysfsutils
+  - unzip
+  - wget
+  - net-tools
+  - yum-utils
+  - lvm2
+  tags:
+    - swarm
+
+- name: "Enable PermitRootLogin in sshd_config"
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#PermitRootLogin yes'
+    insertbefore: 'P '
+    line: 'PermitRootLogin yes'
+
+- name: "Restart the sshd service"
+  service:
+    name: sshd
+    state: restarted
+
+
+- name: "Disable seLinux"
+  selinux:
+    policy: targeted
+    state: disabled
+  register: selinux_output
+  tags:
+    - swarm
+
+- name: print the output from disabling selinux
+  debug:
+    var: selinux_output
+  tags:
+    - swarm
+
+- name: "Reboot if selinux needs it"
+  reboot:
+  when: selinux_output.reboot_required
+
+- name: set timezone to UTC
+  timezone:
+    name: UTC
+    hwclock: UTC
+  tags:
+    - swarm
+  ignore_errors: yes
+
+- debug:
+    var: ansible_facts['distribution']
+
+
+- name: "Check if UFW is installed"
+  shell: command -v ufw
+  register: ufw_firewall_check
+  failed_when:
+    - ufw_firewall_check.rc != 0
+    - ufw_firewall_check.rc != 1
+  tags:
+    - firewall
+    - swarm
+
+- name: "Check if Firewalld is installed"
+  command: "command -v firewalld"
+  register: firewalld_firewall_check
+  failed_when:
+    - firewalld_firewall_check.rc != 0
+    - firewalld_firewall_check.rc != 1
+  tags:
+    - firewall
+    - swarm
+
+- name: "Check if IPTables is installed"
+  command: "command -v iptables"
+  register: iptables_firewall_check
+  failed_when:
+    - iptables_firewall_check.rc != 0
+    - iptables_firewall_check.rc != 1
+  tags:
+    - firewall
+    - swarm
+
+
+- name: "Enable Firewalld and Open Ports for Docker Swarm"
+  include_tasks: firewalld.yml
+  when:
+    - ansible_facts['distribution'] == "CentOS"
+    - firewalld_firewall_check.rc == 0
+  tags:
+    - firewall
+    - swarm
+
+- name: "Enable UFW and Open Ports for Docker Swarm"
+  include_tasks: ufw.yml
+  when:
+    - ansible_facts['distribution'] == "Ubuntu"
+    - ufw_firewall_check.rc == 0
+  tags:
+    - firewall
+    - swarm
+
+- name: "Enable IPTables and Open Ports for Docker Swarm"
+  include_tasks: iptables.yml
+  when:
+    - iptables_firewall_check.rc == 0
+  tags:
+    - firewall
+    - swarm
+
+
+- name: Add Docker repo
+  get_url:
+    url: https://download.docker.com/linux/centos/docker-ce.repo
+    dest: /etc/yum.repos.d/docer-ce.repo
+  when: ansible_facts['distribution'] == "CentOS"
+  tags:
+    - swarm
+
+- apt_repository:
+    repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu xenial stable
+    state: present
+  when: ansible_facts['distribution'] == "Ubuntu"
+  tags:
+    - swarm
+
+- name: Creates directory
+  file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+  tags:
+    - swarm
+
+- name: Copies override.conf for enabling Docker API
+  copy:
+    src: ./files/override.conf
+    dest: /etc/systemd/system/docker.service.d/override.conf
+  tags:
+    - swarm
+
+- name: "Install Docker-CE"
+  package:
+    name: docker-ce
+    state: present
+  tags:
+    - swarm
+
+- name: "Make sure the service starts at boot and is currently started"
+  systemd:
+    name: docker
+    daemon_reload: yes
+    state: started
+    enabled: yes
+  tags:
+    - swarm
+
+
+
+- name: "Execute master.yml tasks"
+  include_tasks: master.yml
+  when:
+    - "'master' in group_names"
+  tags:
+    - swarm
+
+
+- name: "Execute manger.yml tasks"
+  include_tasks: manager.yml
+  when:
+    - "'manager' in group_names"
+  tags:
+    - swarm
+
+  copy:
+    src: ./files/EMC-ScaleIO-sdc-{{vxflex_version}}.el7.x86_64.rpm
+    dest: /tmp/EMC-ScaleIO-sdc-{{vxflex_version}}.el7.x86_64.rpm
+  tags:
+    - sdc
+
+- name: Install SDC
+  yum:
+    name: /tmp/EMC-ScaleIO-sdc-{{vxflex_version}}.el7.x86_64.rpm
+    state: present
+  environment:
+    MDM_IP: "{{ vxflex_master_mdm_ip | join(',') }},{{ vxflex_standby_mdm_ip | join(',')}}"
+  tags:
+    - sdc
+
+- name: Adding user root
+  user: name=root
+        group=docker
+  tags:
+    - swarm
+
+- name: "Find out if rexray is already installed"
+  shell: docker plugin ls | grep rexray
+  register: REXRAY
+  failed_when: "REXRAY.rc == 2"
+  tags:
+    - vxflex
+
+- name: "Install RexRay if it is not already installed"
+  shell: echo "y" | docker plugin install rexray/scaleio SCALEIO_ENDPOINT=https://{{ vxflex_gateway_ip }}:{{ vxflex_gateway_https_port }}/api SCALEIO_USERNAME={{ vxflex_gateway_username }} SCALEIO_PASSWORD={{ vxflex_gateway_pw }} SCALEIO_SYSTEMNAME={{ vxflex_system_name }} SCALEIO_PROTECTIONDOMAINNAME={{ vxflex_protection_domain_name }} SCALEIO_STORAGEPOOLNAME={{vxflex_storage_pool_name}} REXRAY_PREEMPT=true REXRAY_LOGLEVEL={{rexray_log_level}}
+  when: REXRAY.rc == 1
+  tags:
+    - vxflex
